@@ -9,6 +9,7 @@ namespace TaskManagerTelegramBot_Кантуганов.Classes
     public class Users
     {
         public long IdUser { get; set; }
+        public long ChatId { get; set; }
         public List<Events> Events { get; set; }
         public Users(long IdUser) {
             this.IdUser = IdUser;

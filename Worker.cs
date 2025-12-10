@@ -18,7 +18,7 @@ namespace TaskManagerTelegramBot_Кантуганов
     {
         public class Worker : BackgroundService
         {
-            readonly string ConnectionConfig = "Server=127.0.0.1;Port=3306;DataBase=tg_bot;user=root;password=;";
+            readonly string ConnectionConfig = "Server=MySQL-8.2;Port=3306;DataBase=tg_bot;user=root;password=;";
             readonly string Token = "8575507641:AAFiOOJLTD2_0v0ypJHgx2ygK8ERc1qrQ4I";
             TelegramBotClient TelegramBotClient;
             List<Users> Users = new List<Users>();
@@ -40,7 +40,11 @@ namespace TaskManagerTelegramBot_Кантуганов
             "",
             "Задачи пользователя не найдены.",
             "Событие удалено.",
-            "Все события удалены."
+            "Все события удалены.",
+            "Для создания повторяющегося напоминания используйте формат:\n" +
+                "<i><b>каждую среду и воскресенье в 21:00</b>\n" +
+                "Полить цветы.</i>\n\n" +
+                "Поддерживаемые дни: понедельник, вторник, среду, четверг, пятницу, субботу, воскресенье"
         };
 
             public bool CheckFormatDateTime(string value, out DateTime time)
@@ -84,11 +88,17 @@ namespace TaskManagerTelegramBot_Кантуганов
 
             public async void Command(long chatId, string command)
             {
-                MySqlConnection connection = Connection();
-                MySqlDataReader mySqlCommand = Quary("Insert ", connection);
 
                 if (command.ToLower() == "/start") SendMessage(chatId, 0);
-                else if (command.ToLower() == "/create_task") SendMessage(chatId, 1);
+                else if (command.ToLower() == "/create_task")
+                {
+                    SendMessage(chatId, 1);
+                    await TelegramBotClient.SendMessage(
+                        chatId,
+                        Message[7],
+                        ParseMode.Html
+                    );
+                }
                 else if (command.ToLower() == "/list_tasks")
                 {
                     Users User = Users.Find(x => x.IdUser == chatId);
@@ -98,10 +108,16 @@ namespace TaskManagerTelegramBot_Кантуганов
                     {
                         foreach (Events Event in User.Events)
                         {
+                            string eventType = Event.IsRepeating ? "Повторяющееся" : "Разовое";
+                            string scheduleInfo = Event.IsRepeating ?
+                                $"\nПовтор: {Event.RepeatSchedule}" : "";
+
                             await TelegramBotClient.SendMessage(
                                 chatId,
-                                $"Уведомить пользователя: {Event.Time.ToString("HH:mm dd:MM:yyyy")}" +
-                                $"\nСообщение: {Event.Message}",
+                                $"{eventType}\n" +
+                                $"Время: {Event.Time:HH:mm dd.MM.yyyy}" +
+                                $"{scheduleInfo}\n" +
+                                $"Задача: {Event.Message}",
                                 replyMarkup: DeleteEvent(Event.Message)
                             );
                         }
@@ -109,14 +125,40 @@ namespace TaskManagerTelegramBot_Кантуганов
                 }
             }
 
-            private void GetMessages(Message message)
+            private async Task GetMessagesAsync(Message message)
             {
+                string EventQuaryInsert = "INSERT INTO `tg_bot`.`Events` (`ChatId`,`Time`, `Message`) VALUES (@ChatId, @Time, @Message)";
+                string EventQuaryDelete = "DELETE FROM `tg_bot`.`Events` WHERE `ChatId` = @ChatId";
+
+                using (MySqlConnection connection = Connection())
+                {
+                    using (MySqlCommand cmd = new MySqlCommand(EventQuaryInsert, connection))
+                    {
+                        cmd.Parameters.AddWithValue("@ChatId", message.Chat.Id);
+                        cmd.Parameters.AddWithValue("@Time", DateTime.Now);
+                        cmd.Parameters.AddWithValue("@Message", message.Text);
+
+                        await connection.OpenAsync();
+                        await cmd.ExecuteNonQueryAsync();
+                    }
+
+                }
                 Console.WriteLine("Получено сообщение: " + message.Text + " от пользователя: " + message.Chat.Username);
                 long IdUser = message.Chat.Id;
                 string MessageUser = message.Text;
                 if (message.Text.Contains("/")) Command(message.Chat.Id, message.Text);
                 else if (message.Text.Equals("Удалить все задачи"))
                 {
+                    using (MySqlConnection connection = Connection())
+                    {
+                        using (MySqlCommand cmd = new MySqlCommand(EventQuaryDelete, connection))
+                        {
+                            cmd.Parameters.AddWithValue("@ChatId", message.Chat.Id);
+
+                            await connection.OpenAsync();
+                            await cmd.ExecuteNonQueryAsync();
+                        }
+                    }
                     Users User = Users.Find(x => x.IdUser == message.Chat.Id);
                     if (User == null) SendMessage(message.Chat.Id, 4);
                     else if (User.Events.Count == 0) SendMessage(User.IdUser, 4);
@@ -140,6 +182,11 @@ namespace TaskManagerTelegramBot_Кантуганов
                         SendMessage(message.Chat.Id, 2);
                         return;
                     }
+                    if (Info[0].Contains("каждую") || Info[0].Contains("каждый"))
+                    {
+                        ProcessRepeatingTaskAsync(User, message.Text);
+                        return;
+                    }
                     DateTime Time;
                     if (CheckFormatDateTime(Info[0], out Time) == false)
                     {
@@ -159,8 +206,27 @@ namespace TaskManagerTelegramBot_Кантуганов
                 Update update,
                 CancellationToken cancellationToken)
             {
+                if (update.Message is Message message)
+                {
+                    Users user = Users.FirstOrDefault(x => x.ChatId == message.Chat.Id);
+                    if (user == null)
+                    {
+                        string UserQuary = "INSERT INTO `tg_bot`.`Users` (`ChatId`) VALUES (@ChatId)";
+                        using (MySqlConnection connection = Connection())
+                        {
+                            using (MySqlCommand cmd = new MySqlCommand(UserQuary, connection))
+                            {
+                                cmd.Parameters.AddWithValue("@ChatId", message.Chat.Id);
+
+                                await connection.OpenAsync();
+                                await cmd.ExecuteNonQueryAsync();
+                            }
+                        }
+                    }
+                    
+                }
                 if (update.Type == UpdateType.Message)
-                    GetMessages(update.Message);
+                    GetMessagesAsync(update.Message);
                 else if (update.Type == UpdateType.CallbackQuery)
                 {
                     CallbackQuery query = update.CallbackQuery;
@@ -183,16 +249,32 @@ namespace TaskManagerTelegramBot_Кантуганов
             public async void Tick(object obj)
             {
                 string TimeNow = DateTime.Now.ToString("HH:mm dd.MM.yyyy");
+                DateTime now = DateTime.Now;
+
+
                 foreach (Users User in Users)
                 {
-                    for (int i = 0; i < User.Events.Count; i++)
+                    for (int i = User.Events.Count - 1; i >= 0; i--)
                     {
-                        if (User.Events[i].Time.ToString("HH:mm dd.MM.yyyy") != TimeNow) continue;
-                        await TelegramBotClient.SendMessage(
-                            User.IdUser,
-                            "Напоминание: " + User.Events[i].Message
-                        );
-                        User.Events.Remove(User.Events[i]);
+                        var currentEvent = User.Events[i];
+
+                        if (currentEvent.Time.ToString("HH:mm dd.MM.yyyy") == TimeNow)
+                        {
+                            await TelegramBotClient.SendMessage(
+                                User.IdUser,
+                                "Напоминание: " + currentEvent.Message
+                            );
+
+                            if (currentEvent.IsRepeating)
+                            {
+                                currentEvent.UpdateForNextOccurrence();
+                                Console.WriteLine($"Повторяющееся событие обновлено на: {currentEvent.Time}");
+                            }
+                            else
+                            {
+                                User.Events.RemoveAt(i);
+                            }
+                        }
                     }
                 }
             }
@@ -213,16 +295,100 @@ namespace TaskManagerTelegramBot_Кантуганов
 
             public MySqlConnection Connection() {
                 MySqlConnection connection = new MySqlConnection(ConnectionConfig);
-                connection.Open();
                 return connection;
             }
-            public MySqlDataReader Quary(string Command, MySqlConnection connection) {
-                MySqlCommand mySqlCommand = new MySqlCommand(Command, connection);
-                return mySqlCommand.ExecuteReader();
+
+            private async Task ProcessRepeatingTaskAsync(Users user, string text)
+            {
+                try
+                {
+                    string[] lines = text.Split('\n');
+                    if (lines.Length < 2)
+                    {
+                        SendMessage(user.IdUser, 2);
+                        return;
+                    }
+
+                    string scheduleLine = lines[0];
+                    string taskMessage = lines[1];
+
+                    var days = new List<string>();
+                    if (scheduleLine.Contains("понедельник")) days.Add("Monday");
+                    if (scheduleLine.Contains("вторник")) days.Add("Tuesday");
+                    if (scheduleLine.Contains("среду")) days.Add("Wednesday");
+                    if (scheduleLine.Contains("четверг")) days.Add("Thursday");
+                    if (scheduleLine.Contains("пятницу")) days.Add("Friday");
+                    if (scheduleLine.Contains("субботу")) days.Add("Saturday");
+                    if (scheduleLine.Contains("воскресенье")) days.Add("Sunday");
+
+                    if (days.Count == 0)
+                    {
+                        SendMessage(user.IdUser, 2);
+                        return;
+                    }
+
+                    TimeSpan time;
+                    if (!TryParseTimeFromText(scheduleLine, out time))
+                    {
+                        SendMessage(user.IdUser, 2);
+                        return;
+                    }
+
+                    string schedule = string.Join(",", days);
+                    Events repeatingEvent = new Events(taskMessage, schedule, time);
+                    user.Events.Add(repeatingEvent);
+
+                    string daysInRussian = ExtractRussianDays(scheduleLine);
+
+                    await TelegramBotClient.SendMessage(
+                        user.IdUser,
+                        $"Создано повторяющееся напоминание!\n" +
+                        $"Дни: {daysInRussian}\n" +
+                        $"Время: {time:hh\\:mm}\n" +
+                        $"Задача: {taskMessage}\n" +
+                        $"Следующий раз: {repeatingEvent.Time:dd.MM.yyyy HH:mm}"
+                    );
+                }
+                catch (Exception ex)
+                {
+                    Console.WriteLine($"Ошибка при создании повторяющейся задачи: {ex.Message}");
+                    Console.WriteLine($"StackTrace: {ex.StackTrace}");
+                    SendMessage(user.IdUser, 2);
+                }
             }
-            public void CloseConnection(MySqlConnection connection) {
-                MySqlConnection.ClearPool(connection);
-                connection.Close();
+
+            private string ExtractRussianDays(string scheduleLine)
+            {
+                var russianDays = new List<string>();
+
+                if (scheduleLine.Contains("понедельник")) russianDays.Add("понедельник");
+                if (scheduleLine.Contains("вторник")) russianDays.Add("вторник");
+                if (scheduleLine.Contains("среду")) russianDays.Add("среду");
+                if (scheduleLine.Contains("четверг")) russianDays.Add("четверг");
+                if (scheduleLine.Contains("пятницу")) russianDays.Add("пятницу");
+                if (scheduleLine.Contains("субботу")) russianDays.Add("субботу");
+                if (scheduleLine.Contains("воскресенье")) russianDays.Add("воскресенье");
+
+                return string.Join(" и ", russianDays);
+            }
+
+            private bool TryParseTimeFromText(string text, out TimeSpan time)
+            {
+                time = TimeSpan.Zero;
+
+                var timeMatch = System.Text.RegularExpressions.Regex.Match(text, @"(\d{1,2}):(\d{2})");
+                if (timeMatch.Success)
+                {
+                    int hours = int.Parse(timeMatch.Groups[1].Value);
+                    int minutes = int.Parse(timeMatch.Groups[2].Value);
+
+                    if (hours == 24) hours = 0;
+
+                    time = new TimeSpan(hours, minutes, 0);
+                    return true;
+                }
+
+                return false;
             }
         }
     }
