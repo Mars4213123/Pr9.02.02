@@ -1,8 +1,6 @@
 ﻿using System;
 using System.Collections.Generic;
 using System.Linq;
-using System.Text;
-using System.Threading.Tasks;
 
 namespace TaskManagerTelegramBot_Кантуганов.Classes
 {
@@ -13,11 +11,14 @@ namespace TaskManagerTelegramBot_Кантуганов.Classes
         public bool IsRepeating { get; set; }
         public string RepeatSchedule { get; set; }
         public TimeSpan? RepeatTime { get; set; }
-        public Events(DateTime Time, string Message) {
+
+        public Events(DateTime Time, string Message)
+        {
             this.Time = Time;
             this.Message = Message;
             this.IsRepeating = false;
         }
+
         public Events(string message, string schedule, TimeSpan time)
         {
             this.Message = message;
@@ -26,6 +27,7 @@ namespace TaskManagerTelegramBot_Кантуганов.Classes
             this.RepeatTime = time;
             CalculateNextTime();
         }
+
         private void CalculateNextTime()
         {
             if (!IsRepeating || !RepeatTime.HasValue) return;
@@ -55,6 +57,7 @@ namespace TaskManagerTelegramBot_Кантуганов.Classes
                     }
                 }
             }
+
             for (int i = 1; i <= 7; i++)
             {
                 var checkDate = now.Date.AddDays(i);
